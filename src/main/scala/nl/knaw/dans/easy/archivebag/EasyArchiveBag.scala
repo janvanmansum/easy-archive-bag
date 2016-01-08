@@ -21,6 +21,7 @@ import java.nio.file.{Files, Paths}
 import java.util.zip.{ZipEntry, ZipOutputStream}
 
 import org.apache.commons.codec.digest.DigestUtils
+import org.apache.commons.codec.net.URLCodec
 import org.apache.commons.configuration.PropertiesConfiguration
 import org.apache.commons.io.IOUtils
 import org.apache.http.auth.{AuthScope, UsernamePasswordCredentials}
@@ -29,7 +30,7 @@ import org.apache.http.entity.{ContentType, FileEntity}
 import org.apache.http.impl.client.{CloseableHttpClient, BasicCredentialsProvider, HttpClients}
 import org.slf4j.LoggerFactory
 
-import scala.util.Try
+import scala.util.{Failure, Try}
 import scala.xml._
 import scala.util.control._
 
@@ -42,6 +43,7 @@ object Settings {
       checkInterval = conf.checkInterval(),
       maxCheckCount = conf.maxCheckCount(),
       bagDir = conf.bagDirectory(),
+      slug = conf.slug.get,
       storageDepositService =  conf.storageServiceUrl())
 }
 
@@ -51,6 +53,7 @@ case class Settings(
        checkInterval: Int,
        maxCheckCount: Int,
        bagDir: File,
+       slug: Option[String],
        storageDepositService: URL)
 
 object EasyArchiveBag {
@@ -83,6 +86,7 @@ object EasyArchiveBag {
     post.addHeader("Content-Disposition", "attachment; filename=bag.zip")
     post.addHeader("Content-MD5", md5hex)
     post.addHeader("Packaging", BAGIT_URI)
+    s.slug.map(slug => post.addHeader("Slug", new URLCodec("UTF-8").encode(slug, "UTF-8")))
     post.setEntity(new FileEntity(tempFile, ContentType.create("application/zip")))
     val response = http.execute(post)
     if (log.isDebugEnabled) {
@@ -92,35 +96,37 @@ object EasyArchiveBag {
     }
     val deleted = tempFile.delete()
     if(!deleted) log.warn(s"Delete of $tempFile failed")
-    val storageDatasetDir = response.getStatusLine.getStatusCode match {
+    response.getStatusLine.getStatusCode match {
       case 201 =>
         val location = response.getFirstHeader("Location").getValue
         log.info("SUCCESS")
         log.info(s"Deposit created at: $location")
-        s"${location.split('/').last}/${s.bagDir.getName}"
-
+        getStatementUrl(response.getEntity.getContent) match {
+          case Some(url) => (location, getConfirmationState(url, http))
+          case _ =>
+            throw new RuntimeException("Could not retreive Stat-IRI, so unable to validate transfer to archival storage")
+        }
       case _ =>
         val writer = new StringWriter()
         IOUtils.copy(response.getEntity.getContent, writer, "UTF-8")
         log.error(s"Deposit failed: ${response.getStatusLine}, ${writer.toString}")
         throw new RuntimeException("Deposit failed")
     }
-    log.debug(s"Storage dataset directory ${storageDatasetDir} is created")
-    (storageDatasetDir, getConfirmationState(storageDatasetDir, http))
   }
 
-  def getConfirmationState(locationBagDir : String, http : CloseableHttpClient)(implicit s: Settings) : String = {
+  def getStatementUrl(is: InputStream): Option[URL] = {
+    val depositReceiptDoc = XML.load(is)
+    val statIriLink = (depositReceiptDoc \ "link").toList.find(n => (n \@ "rel") == "http://purl.org/net/sword/terms/statement")
+    statIriLink.map(link => link \@ "href").map(urlString => new URL(urlString))
+  }
+
+  def getConfirmationState(stateIri : URL, http : CloseableHttpClient)(implicit s: Settings) : String = {
     var state = STATE_FINALIZING
-    val protocol = s.storageDepositService.getProtocol
-    val host = s.storageDepositService.getHost
-    val context = s.storageDepositService.getPath.split('/')(1)
-    val location = locationBagDir.split('/')(0)
-    val url = s"${protocol}://${host}/${context}/statement/${location}"
 
     //Wait for confirmation that deposit is valid (SUBMITTED or REJECTED)
     var counter = 0;
     while (state == STATE_FINALIZING && counter < s.maxCheckCount) {
-      val content = getResponseContent(url, http)
+      val content = getResponseContent(stateIri, http)
       val resp = XML.loadString(content)
       state = ((resp \"category").filter(_.attribute("label").exists(_.text.equals("State")))
         .filter(_.attribute("scheme").exists(_.text.equals("http://purl.org/net/sword/terms/state"))) \\ "@term").text
@@ -134,9 +140,9 @@ object EasyArchiveBag {
     state
   }
 
-  def getResponseContent(url: String, httpClients: CloseableHttpClient): String = {
-    val httpResponse = httpClients.execute(new HttpGet(url))
-    httpResponse.getStatusLine.getStatusCode match {
+  def getResponseContent(url: URL, httpClients: CloseableHttpClient): String = {
+    val httpResponse = httpClients.execute(new HttpGet(url.toURI))
+      httpResponse.getStatusLine.getStatusCode match {
       case 200 =>
         val entity = httpResponse.getEntity
         var content = ""
