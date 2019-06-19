@@ -78,16 +78,16 @@ object EasyArchiveBag extends Bagit5FacadeComponent with DebugEnhancedLogging {
   }
 
   private def addBagToIndex(bagId: BagId)(implicit ps: Parameters): Try[Unit] = Try {
-    val response = ps.http(ps.bagIndexService.resolve(s"bags/$bagId").toASCIIString)
-      .method("PUT")
-      .asString
-
-    response.code match {
-      case 201 => ()
-      case _ =>
-        logger.error(s"${ ps.storageDepositService } returned:[ ${ response.statusLine } ] while adding new bag to bag index. Body = ${ response.body }")
-        throw new IllegalStateException("Error trying to add bag to index")
-    }
+//    val response = ps.http(ps.bagIndexService.resolve(s"bags/$bagId").toASCIIString)
+//      .method("PUT")
+//      .asString
+//
+//    response.code match {
+//      case 201 => ()
+//      case _ =>
+//        logger.error(s"${ ps.storageDepositService } returned:[ ${ response.statusLine } ] while adding new bag to bag index. Body = ${ response.body }")
+//        throw new IllegalStateException("Error trying to add bag to index")
+//    }
   }
 
   private def createRefBagsTxt(versionOfId: BagId)(implicit ps: Parameters): Try[Unit] = {
